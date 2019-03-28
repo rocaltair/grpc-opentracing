@@ -41,6 +41,9 @@ func OpenTracingServerInterceptor(tracer opentracing.Tracer, optFuncs ...Option)
 		}
 		if otgrpcOpts.inclusionFunc != nil &&
 			!otgrpcOpts.inclusionFunc(spanContext, info.FullMethod, req, nil) {
+			if otgrpcOpts.serverInterceptor != nil {
+				return otgrpcOpts.serverInterceptor(ctx, req, info, handler)
+			}
 			return handler(ctx, req)
 		}
 		serverSpan := tracer.StartSpan(
@@ -54,17 +57,21 @@ func OpenTracingServerInterceptor(tracer opentracing.Tracer, optFuncs ...Option)
 		if otgrpcOpts.logPayloads {
 			serverSpan.LogFields(log.Object("gRPC request", req))
 		}
-		resp, err = handler(ctx, req)
+		if otgrpcOpts.serverInterceptor != nil {
+			resp, err = otgrpcOpts.serverInterceptor(ctx, req, info, handler)
+		} else {
+			resp, err = handler(ctx, req)
+		}
 		if err == nil {
 			if otgrpcOpts.logPayloads {
 				serverSpan.LogFields(log.Object("gRPC response", resp))
 			}
-		} else {
+		} else if otgrpcOpts.logError {
 			SetSpanTags(serverSpan, err, false)
 			serverSpan.LogFields(log.String("event", "error"), log.String("message", err.Error()))
 		}
 		if otgrpcOpts.decorator != nil {
-			otgrpcOpts.decorator(serverSpan, info.FullMethod, req, resp, err)
+			otgrpcOpts.decorator(ctx, serverSpan, info.FullMethod, req, resp, err)
 		}
 		return resp, err
 	}
@@ -98,6 +105,9 @@ func OpenTracingStreamServerInterceptor(tracer opentracing.Tracer, optFuncs ...O
 		}
 		if otgrpcOpts.inclusionFunc != nil &&
 			!otgrpcOpts.inclusionFunc(spanContext, info.FullMethod, nil, nil) {
+			if otgrpcOpts.streamServerInterceptor != nil {
+				return otgrpcOpts.streamServerInterceptor(srv, ss, info, handler)
+			}
 			return handler(srv, ss)
 		}
 
@@ -107,17 +117,24 @@ func OpenTracingStreamServerInterceptor(tracer opentracing.Tracer, optFuncs ...O
 			gRPCComponentTag,
 		)
 		defer serverSpan.Finish()
+		newCtx := opentracing.ContextWithSpan(ss.Context(), serverSpan)
 		ss = &openTracingServerStream{
 			ServerStream: ss,
-			ctx:          opentracing.ContextWithSpan(ss.Context(), serverSpan),
+			ctx:          newCtx,
 		}
-		err = handler(srv, ss)
-		if err != nil {
+
+		if otgrpcOpts.streamServerInterceptor != nil {
+			err = otgrpcOpts.streamServerInterceptor(srv, ss, info, handler)
+		} else {
+			err = handler(srv, ss)
+		}
+
+		if err != nil && otgrpcOpts.logError {
 			SetSpanTags(serverSpan, err, false)
 			serverSpan.LogFields(log.String("event", "error"), log.String("message", err.Error()))
 		}
 		if otgrpcOpts.decorator != nil {
-			otgrpcOpts.decorator(serverSpan, info.FullMethod, nil, nil, err)
+			otgrpcOpts.decorator(newCtx, serverSpan, info.FullMethod, nil, nil, err)
 		}
 		return err
 	}
@@ -133,7 +150,7 @@ func (ss *openTracingServerStream) Context() context.Context {
 }
 
 func extractSpanContext(ctx context.Context, tracer opentracing.Tracer) (opentracing.SpanContext, error) {
-	md, ok := metadata.FromIncomingContext(ctx)
+	md, ok := metadata.FromContext(ctx)
 	if !ok {
 		md = metadata.New(nil)
 	}

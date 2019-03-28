@@ -1,6 +1,11 @@
 package otgrpc
 
-import "github.com/opentracing/opentracing-go"
+import (
+	"context"
+
+	"github.com/opentracing/opentracing-go"
+	"google.golang.org/grpc"
+)
 
 // Option instances may be used in OpenTracing(Server|Client)Interceptor
 // initialization.
@@ -14,6 +19,14 @@ type Option func(o *options)
 func LogPayloads() Option {
 	return func(o *options) {
 		o.logPayloads = true
+	}
+}
+
+// LogError returns an Option that tells the OpenTracing instrumentation to
+// try to log errors in both directions.
+func LogError() Option {
+	return func(o *options) {
+		o.logError = true
 	}
 }
 
@@ -39,6 +52,7 @@ func IncludingSpans(inclusionFunc SpanInclusionFunc) Option {
 // arbitrary tags/logs/etc to the opentracing.Span associated with client
 // and/or server RPCs.
 type SpanDecoratorFunc func(
+	ctx context.Context,
 	span opentracing.Span,
 	method string,
 	req, resp interface{},
@@ -51,14 +65,35 @@ func SpanDecorator(decorator SpanDecoratorFunc) Option {
 	}
 }
 
+// WithServerInterceptor ...
+func WithServerInterceptor(serverInterceptor grpc.UnaryServerInterceptor) Option {
+	return func(o *options) {
+		o.serverInterceptor = serverInterceptor
+	}
+}
+
+// WithStreamServerInterceptor ...
+func WithStreamServerInterceptor(streamServerInterceptor grpc.StreamServerInterceptor) Option {
+	return func(o *options) {
+		o.streamServerInterceptor = streamServerInterceptor
+	}
+}
+
 // The internal-only options struct. Obviously overkill at the moment; but will
 // scale well as production use dictates other configuration and tuning
 // parameters.
 type options struct {
 	logPayloads bool
+	logError    bool
 	decorator   SpanDecoratorFunc
 	// May be nil.
 	inclusionFunc SpanInclusionFunc
+
+	// serverInterceptor can be nil
+	serverInterceptor grpc.UnaryServerInterceptor
+
+	// streamServerInterceptor can be nil
+	streamServerInterceptor grpc.StreamServerInterceptor
 }
 
 // newOptions returns the default options.

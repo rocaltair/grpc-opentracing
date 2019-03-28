@@ -53,7 +53,7 @@ func OpenTracingClientInterceptor(tracer opentracing.Tracer, optFuncs ...Option)
 			gRPCComponentTag,
 		)
 		defer clientSpan.Finish()
-		ctx = injectSpanContext(ctx, tracer, clientSpan)
+		ctx = injectSpanContext(ctx, tracer, clientSpan, otgrpcOpts)
 		if otgrpcOpts.logPayloads {
 			clientSpan.LogFields(log.Object("gRPC request", req))
 		}
@@ -62,12 +62,12 @@ func OpenTracingClientInterceptor(tracer opentracing.Tracer, optFuncs ...Option)
 			if otgrpcOpts.logPayloads {
 				clientSpan.LogFields(log.Object("gRPC response", resp))
 			}
-		} else {
+		} else if otgrpcOpts.logError {
 			SetSpanTags(clientSpan, err, true)
 			clientSpan.LogFields(log.String("event", "error"), log.String("message", err.Error()))
 		}
 		if otgrpcOpts.decorator != nil {
-			otgrpcOpts.decorator(clientSpan, method, req, resp, err)
+			otgrpcOpts.decorator(ctx, clientSpan, method, req, resp, err)
 		}
 		return err
 	}
@@ -115,11 +115,13 @@ func OpenTracingStreamClientInterceptor(tracer opentracing.Tracer, optFuncs ...O
 			ext.SpanKindRPCClient,
 			gRPCComponentTag,
 		)
-		ctx = injectSpanContext(ctx, tracer, clientSpan)
+		ctx = injectSpanContext(ctx, tracer, clientSpan, otgrpcOpts)
 		cs, err := streamer(ctx, desc, cc, method, opts...)
 		if err != nil {
-			clientSpan.LogFields(log.String("event", "error"), log.String("message", err.Error()))
-			SetSpanTags(clientSpan, err, true)
+			if otgrpcOpts.logError {
+				clientSpan.LogFields(log.String("event", "error"), log.String("message", err.Error()))
+				SetSpanTags(clientSpan, err, true)
+			}
 			clientSpan.Finish()
 			return cs, err
 		}
@@ -142,12 +144,12 @@ func newOpenTracingClientStream(cs grpc.ClientStream, method string, desc *grpc.
 		}
 		close(finishChan)
 		defer clientSpan.Finish()
-		if err != nil {
+		if err != nil && otgrpcOpts.logError {
 			clientSpan.LogFields(log.String("event", "error"), log.String("message", err.Error()))
 			SetSpanTags(clientSpan, err, true)
 		}
 		if otgrpcOpts.decorator != nil {
-			otgrpcOpts.decorator(clientSpan, method, nil, nil, err)
+			otgrpcOpts.decorator(cs.Context(), clientSpan, method, nil, nil, err)
 		}
 	}
 	go func() {
@@ -222,8 +224,8 @@ func (cs *openTracingClientStream) CloseSend() error {
 	return err
 }
 
-func injectSpanContext(ctx context.Context, tracer opentracing.Tracer, clientSpan opentracing.Span) context.Context {
-	md, ok := metadata.FromOutgoingContext(ctx)
+func injectSpanContext(ctx context.Context, tracer opentracing.Tracer, clientSpan opentracing.Span, otgrpcOpts *options) context.Context {
+	md, ok := metadata.FromContext(ctx)
 	if !ok {
 		md = metadata.New(nil)
 	} else {
@@ -232,8 +234,8 @@ func injectSpanContext(ctx context.Context, tracer opentracing.Tracer, clientSpa
 	mdWriter := metadataReaderWriter{md}
 	err := tracer.Inject(clientSpan.Context(), opentracing.HTTPHeaders, mdWriter)
 	// We have no better place to record an error than the Span itself :-/
-	if err != nil {
+	if err != nil && otgrpcOpts.logError {
 		clientSpan.LogFields(log.String("event", "Tracer.Inject() failed"), log.Error(err))
 	}
-	return metadata.NewOutgoingContext(ctx, md)
+	return metadata.NewContext(ctx, md)
 }
